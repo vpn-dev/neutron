@@ -813,7 +813,7 @@ class OVSNeutronAgent(sg_rpc.SecurityGroupAgentRpcCallbackMixin,
                 LOG.error(_LE("Expected port %s not found"), port.vif_id)
             else:
                 LOG.debug("Unable to get config for port %s", port.vif_id)
-            return
+            return False
 
         vlan_mapping = {'net_uuid': net_uuid,
                         'network_type': network_type,
@@ -823,6 +823,7 @@ class OVSNeutronAgent(sg_rpc.SecurityGroupAgentRpcCallbackMixin,
         port_other_config.update(vlan_mapping)
         self.int_br.set_db_attribute("Port", port.port_name, "other_config",
                                      port_other_config)
+        return True
 
     def _add_port_tag_info(self, need_binding_ports):
         port_names = [p['vif_port'].port_name for p in need_binding_ports]
@@ -1324,9 +1325,10 @@ class OVSNeutronAgent(sg_rpc.SecurityGroupAgentRpcCallbackMixin,
                          "and might not be able to transmit"), vif_port.vif_id)
         if vif_port:
             if admin_state_up:
-                self.port_bound(vif_port, network_id, network_type,
-                                physical_network, segmentation_id,
-                                fixed_ips, device_owner, ovs_restarted)
+                port_needs_binding = self.port_bound(
+                    vif_port, network_id, network_type,
+                    physical_network, segmentation_id,
+                    fixed_ips, device_owner, ovs_restarted)
             else:
                 LOG.info(_LI("VIF port: %s admin state up disabled, "
                              "putting on the dead VLAN"), vif_port.vif_id)
