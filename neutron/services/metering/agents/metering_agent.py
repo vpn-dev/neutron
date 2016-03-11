@@ -86,6 +86,7 @@ class MeteringAgent(MeteringPluginRpc, manager.Manager):
         self.host = host
 
         self.label_tenant_id = {}
+        self.label_names = {}
         self.routers = {}
         self.metering_infos = {}
         super(MeteringAgent, self).__init__(host=host)
@@ -101,6 +102,7 @@ class MeteringAgent(MeteringPluginRpc, manager.Manager):
     def _metering_notification(self):
         for label_id, info in self.metering_infos.items():
             data = {'label_id': label_id,
+                    'label_name': self.label_names.get(label_id),
                     'tenant_id': self.label_tenant_id.get(label_id),
                     'pkts': info['pkts'],
                     'bytes': info['bytes'],
@@ -143,12 +145,14 @@ class MeteringAgent(MeteringPluginRpc, manager.Manager):
 
     def _add_metering_infos(self):
         self.label_tenant_id = {}
+        self.label_names = {}
         for router in self.routers.values():
             tenant_id = router['tenant_id']
             labels = router.get(constants.METERING_LABEL_KEY, [])
             for label in labels:
                 label_id = label['id']
                 self.label_tenant_id[label_id] = tenant_id
+                self.label_names[label_id] = label['name']
 
             tenant_id = self.label_tenant_id.get
         accs = self._get_traffic_counters(self.context, self.routers.values())

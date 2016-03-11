@@ -194,6 +194,7 @@ class MeteringDbMixin(metering.MeteringPluginBase,
         rules = []
         for rule in metering_label.rules:
             rule_dict = self._make_metering_label_rule_dict(rule)
+            rule_dict['label_name'] = metering_label.name
             rules.append(rule_dict)
 
         return rules
@@ -229,7 +230,7 @@ class MeteringDbMixin(metering.MeteringPluginBase,
 
                 rules = self._get_metering_rules_dict(label)
 
-                data = {'id': label['id'], 'rules': rules}
+                data = {'id': label['id'], 'name': label.name, 'rules': rules}
                 router_dict[constants.METERING_LABEL_KEY].append(data)
 
                 routers_dict[router['id']] = router_dict
@@ -249,7 +250,8 @@ class MeteringDbMixin(metering.MeteringPluginBase,
         for router in routers:
             router_dict = routers_dict.get(router['id'],
                                            self._make_router_dict(router))
-            data = {'id': label['id'], 'rule': rule}
+            rule['label_name'] = label.name
+            data = {'id': label['id'], 'name': label.name, 'rule': rule}
             router_dict[constants.METERING_LABEL_KEY].append(data)
             routers_dict[router['id']] = router_dict
 
