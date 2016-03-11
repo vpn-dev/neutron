@@ -175,10 +175,18 @@ class IptablesMeteringDriver(abstract_driver.MeteringAbstractDriver):
 
     def _prepare_rule(self, ext_dev, rule, label_chain):
         remote_ip = rule['remote_ip_prefix']
-        if rule['direction'] == 'egress':
-            dir_opt = '-o %s -s %s' % (ext_dev, remote_ip)
+
+        #hacker here, if the label is enable with _esp, it is for vpn metrics
+        if rule['label_name'].endswith('_esp'):
+            if rule['direction'] == 'egress':
+                dir_opt = '-s %s' % (remote_ip)
+            else:
+                dir_opt = '-d %s' % (remote_ip)
         else:
-            dir_opt = '-i %s -d %s' % (ext_dev, remote_ip)
+            if rule['direction'] == 'egress':
+                dir_opt = '-o %s -s %s' % (ext_dev, remote_ip)
+            else:
+                dir_opt = '-i %s -d %s' % (ext_dev, remote_ip)
 
         if rule['excluded']:
             ipt_rule = '%s -j RETURN' % dir_opt
