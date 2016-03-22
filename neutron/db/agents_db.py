@@ -29,6 +29,7 @@ from neutron.callbacks import events
 from neutron.callbacks import registry
 from neutron.callbacks import resources
 from neutron.common import constants
+from neutron.db import api as db_api
 from neutron.db import model_base
 from neutron.db import models_v2
 from neutron.extensions import agent as ext_agent
@@ -300,6 +301,7 @@ class AgentExtRpcCallback(object):
         super(AgentExtRpcCallback, self).__init__()
         self.plugin = plugin
 
+    @db_api.retry_db_errors
     def report_state(self, context, **kwargs):
         """Report state from agent to server.
 
