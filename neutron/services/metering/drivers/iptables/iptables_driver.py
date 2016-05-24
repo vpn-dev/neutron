@@ -374,7 +374,8 @@ class IptablesMeteringDriver(abstract_driver.MeteringAbstractDriver):
                 except RuntimeError:
                     LOG.warn(_LW('Failed to get traffic counters, '
                                       'router: %s'), router)
-                    routers_to_reconfigure.append(router['id'])
+                    if router['id'] not in routers_to_reconfigure:
+                        routers_to_reconfigure.append(router['id'])
                     continue
 
                 if not chain_acc:
