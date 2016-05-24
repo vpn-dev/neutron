@@ -56,7 +56,10 @@ class IptablesManagerTransaction(object):
     def __exit__(self, type, value, traceback):
         transaction = self.__transactions.get(self.im)
         if transaction == 1:
-            self.im.apply()
+            try:
+                self.im.apply()
+            except:
+                pass
             del self.__transactions[self.im]
         else:
             transaction -= 1
@@ -146,6 +149,12 @@ class IptablesMeteringDriver(abstract_driver.MeteringAbstractDriver):
     def _process_metering_label_rule_add(self, rm, rule, ext_dev,
                                          label_chain, rules_chain):
         im = rm.iptables_manager
+        try:
+            im.ipv4['filter'].add_chain(label_chain, wrap=False)
+            im.ipv4['filter'].add_rule(label_chain, '', wrap=False)
+            im.ipv4['filter'].add_chain(rules_chain, wrap=False)
+        except:
+            pass
         self._add_rule_to_chain(ext_dev, rule, im, label_chain, rules_chain)
 
     def _process_metering_label_rule_delete(self, rm, rule, ext_dev,
