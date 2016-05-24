@@ -23,7 +23,7 @@ from neutron.agent.linux import interface
 from neutron.agent.linux import iptables_manager
 from neutron.common import constants as constants
 from neutron.common import ipv6_utils
-from neutron.i18n import _LE, _LI
+from neutron.i18n import _LE, _LI, _LW
 from neutron.services.metering.drivers import abstract_driver
 
 
@@ -356,6 +356,7 @@ class IptablesMeteringDriver(abstract_driver.MeteringAbstractDriver):
     @log_helpers.log_method_call
     def get_traffic_counters(self, context, routers):
         accs = {}
+        routers_to_reconfigure = []
         for router in routers:
             rm = self.routers.get(router['id'])
             if not rm:
@@ -371,8 +372,9 @@ class IptablesMeteringDriver(abstract_driver.MeteringAbstractDriver):
                     chain_acc = rm.iptables_manager.get_traffic_counters(
                         chain, wrap=False, zero=True)
                 except RuntimeError:
-                    LOG.exception(_LE('Failed to get traffic counters, '
+                    LOG.warn(_LW('Failed to get traffic counters, '
                                       'router: %s'), router)
+                    routers_to_reconfigure.append(router['id'])
                     continue
 
                 if not chain_acc:
@@ -384,5 +386,9 @@ class IptablesMeteringDriver(abstract_driver.MeteringAbstractDriver):
                 acc['bytes'] += chain_acc['bytes']
 
                 accs[label_id] = acc
+
+        for router_id in routers_to_reconfigure:
+            self.routers.pop(router_id, None)
+            LOG.warn(_LW('Auto recovery router: %s'), router)
 
         return accs
