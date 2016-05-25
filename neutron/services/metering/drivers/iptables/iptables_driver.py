@@ -21,6 +21,7 @@ import six
 from neutron.agent.common import config
 from neutron.agent.linux import interface
 from neutron.agent.linux import iptables_manager
+from neutron.agent.linux import ip_lib
 from neutron.common import constants as constants
 from neutron.common import ipv6_utils
 from neutron.i18n import _LE, _LI, _LW
@@ -57,7 +58,8 @@ class IptablesManagerTransaction(object):
         transaction = self.__transactions.get(self.im)
         if transaction == 1:
             try:
-                self.im.apply()
+                if self.im.namespace in ip_lib.IPWrapper.get_namespaces():
+                    self.im.apply()
             except:
                 pass
             del self.__transactions[self.im]
@@ -363,14 +365,15 @@ class IptablesMeteringDriver(abstract_driver.MeteringAbstractDriver):
                 continue
 
             for label_id, label in rm.metering_labels.items():
+                chain_acc = None
                 try:
                     chain = iptables_manager.get_chain_name(WRAP_NAME +
                                                             LABEL +
                                                             label_id,
                                                             wrap=False)
-
-                    chain_acc = rm.iptables_manager.get_traffic_counters(
-                        chain, wrap=False, zero=True)
+                    if rm.ns_name in ip_lib.IPWrapper.get_namespaces():
+                        chain_acc = rm.iptables_manager.get_traffic_counters(
+                            chain, wrap=False, zero=True)
                 except RuntimeError:
                     LOG.warn(_LW('Failed to get traffic counters, '
                                       'router: %s'), router)
