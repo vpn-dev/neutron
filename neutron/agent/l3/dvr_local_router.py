@@ -139,26 +139,10 @@ class DvrLocalRouter(dvr_router_base.DvrRouterBase):
             self.fip_ns.local_subnets.release(self.router_id)
             self.rtr_fip_subnet = None
             ns_ip.del_veth(fip_2_rtr_name)
-            is_last = self.fip_ns.unsubscribe(self.router_id)
-            if is_last:
-                # TODO(Carl) I can't help but think that another router could
-                # come in and want to start using this namespace while this is
-                # destroying it.  The two could end up conflicting on
-                # creating/destroying interfaces and such.  I think I'd like a
-                # semaphore to sync creation/deletion of this namespace.
-
-                # NOTE (Swami): Since we are deleting the namespace here we
-                # should be able to delete the floatingip agent gateway port
-                # for the provided external net since we don't need it anymore.
-                if self.fip_ns.agent_gateway_port:
-                    LOG.debug('Removed last floatingip, so requesting the '
-                              'server to delete Floatingip Agent Gateway port:'
-                              '%s', self.fip_ns.agent_gateway_port)
-                    self.agent.plugin_rpc.delete_agent_gateway_port(
-                        self.agent.context,
-                        self.fip_ns.agent_gateway_port['network_id'])
-                self.fip_ns.delete()
-                self.fip_ns = None
+            self.fip_ns.unsubscribe(self.router_id)
+            # NOTE (Swami): The fg interface and the namespace will be deleted
+            # when the external gateway port is removed. This will be
+            # initiated from the server through an RPC call.
 
     def add_floating_ip(self, fip, interface_name, device):
         if not self._add_fip_addr_to_device(fip, device):
@@ -461,11 +445,14 @@ class DvrLocalRouter(dvr_router_base.DvrRouterBase):
                     LOG.error(_LE("No FloatingIP agent gateway port "
                                   "returned from server for 'network-id': "
                                   "%s"), ex_gw_port['network_id'])
-            if is_first and fip_agent_port:
+            if fip_agent_port:
                 if 'subnets' not in fip_agent_port:
                     LOG.error(_LE('Missing subnet/agent_gateway_port'))
                 else:
-                    self.fip_ns.create_gateway_port(fip_agent_port)
+                    if is_first:
+                        self.fip_ns.create_gateway_port(fip_agent_port)
+                    else:
+                        self.fip_ns.update_gateway_port(fip_agent_port)
 
             if (self.fip_ns.agent_gateway_port and
                 (self.dist_fip_count == 0 or is_first)):

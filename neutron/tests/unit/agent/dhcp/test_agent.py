@@ -312,18 +312,16 @@ class TestDhcpAgent(base.BaseTestCase):
         network = mock.Mock()
         network.id = '1'
         self.driver.return_value.foo.side_effect = exc or Exception
-        with mock.patch.object(dhcp_agent.LOG, trace_level) as log:
-            dhcp = dhcp_agent.DhcpAgent(HOSTNAME)
-            with mock.patch.object(dhcp,
-                                   'schedule_resync') as schedule_resync:
-                self.assertIsNone(dhcp.call_driver('foo', network))
-                self.driver.assert_called_once_with(cfg.CONF,
-                                                    mock.ANY,
-                                                    mock.ANY,
-                                                    mock.ANY,
-                                                    mock.ANY)
-                self.assertEqual(log.call_count, 1)
-                self.assertEqual(expected_sync, schedule_resync.called)
+        dhcp = dhcp_agent.DhcpAgent(HOSTNAME)
+        with mock.patch.object(dhcp,
+                               'schedule_resync') as schedule_resync:
+            self.assertIsNone(dhcp.call_driver('foo', network))
+            self.driver.assert_called_once_with(cfg.CONF,
+                                                mock.ANY,
+                                                mock.ANY,
+                                                mock.ANY,
+                                                mock.ANY)
+            self.assertEqual(expected_sync, schedule_resync.called)
 
     def test_call_driver_ip_address_generation_failure(self):
         error = oslo_messaging.RemoteError(
@@ -619,11 +617,14 @@ class TestDhcpAgentEventHandler(base.BaseTestCase):
             mock.call.get_network_info(network.id)])
         self.call_driver.assert_called_once_with('enable', network)
         self.cache.assert_has_calls([mock.call.put(network)])
-        if is_isolated_network:
+        if is_isolated_network and enable_isolated_metadata:
             self.external_process.assert_has_calls([
                 self._process_manager_constructor_call(),
-                mock.call().enable()
-            ])
+                mock.call().enable()])
+        elif not enable_isolated_metadata:
+            self.external_process.assert_has_calls([
+                self._process_manager_constructor_call(ns=None),
+                mock.call().disable()])
         else:
             self.assertFalse(self.external_process.call_count)
 
@@ -704,13 +705,11 @@ class TestDhcpAgentEventHandler(base.BaseTestCase):
 
     def test_enable_dhcp_helper_network_none(self):
         self.plugin.get_network_info.return_value = None
-        with mock.patch.object(dhcp_agent.LOG, 'warn') as log:
-            self.dhcp.enable_dhcp_helper('fake_id')
-            self.plugin.assert_has_calls(
-                [mock.call.get_network_info('fake_id')])
-            self.assertFalse(self.call_driver.called)
-            self.assertTrue(log.called)
-            self.assertFalse(self.dhcp.schedule_resync.called)
+        self.dhcp.enable_dhcp_helper('fake_id')
+        self.plugin.assert_has_calls(
+            [mock.call.get_network_info('fake_id')])
+        self.assertFalse(self.call_driver.called)
+        self.assertFalse(self.dhcp.schedule_resync.called)
 
     def test_enable_dhcp_helper_exception_during_rpc(self):
         self.plugin.get_network_info.side_effect = Exception
@@ -727,6 +726,7 @@ class TestDhcpAgentEventHandler(base.BaseTestCase):
     def test_enable_dhcp_helper_driver_failure(self):
         self.plugin.get_network_info.return_value = fake_network
         self.call_driver.return_value = False
+        cfg.CONF.set_override('enable_isolated_metadata', True)
         self.dhcp.enable_dhcp_helper(fake_network.id)
         self.plugin.assert_has_calls(
             [mock.call.get_network_info(fake_network.id)])
@@ -888,6 +888,20 @@ class TestDhcpAgentEventHandler(base.BaseTestCase):
                 [mock.call.get_network_by_id('net-id')])
             self.assertTrue(log.called)
             self.assertTrue(self.dhcp.schedule_resync.called)
+
+    def test_subnet_create_restarts_with_dhcp_disabled(self):
+        payload = dict(subnet=dhcp.DictModel(
+              dict(network_id=fake_network.id, enable_dhcp=False,
+                   cidr='99.99.99.0/24')))
+        self.cache.get_network_by_id.return_value = fake_network
+        new_net = copy.deepcopy(fake_network)
+        new_net.subnets.append(payload['subnet'])
+        self.plugin.get_network_info.return_value = new_net
+
+        self.dhcp.subnet_create_end(None, payload)
+
+        self.cache.assert_has_calls([mock.call.put(new_net)])
+        self.call_driver.assert_called_once_with('restart', new_net)
 
     def test_subnet_update_end(self):
         payload = dict(subnet=dict(network_id=fake_network.id))
@@ -1291,7 +1305,8 @@ class TestDeviceManager(base.BaseTestCase):
                                            port.id,
                                            'tap12345678-12',
                                            'aa:bb:cc:dd:ee:ff',
-                                           namespace=net.namespace))
+                                           namespace=net.namespace,
+                                           mtu=None))
         self.mock_driver.assert_has_calls(expected)
 
         dh._set_default_route.assert_called_once_with(net, 'tap12345678-12')
@@ -1304,7 +1319,7 @@ class TestDeviceManager(base.BaseTestCase):
 
     def test_setup_calls_fill_dhcp_udp_checksums(self):
         self._test_setup_helper(False)
-        rule = ('-p udp --dport %d -j CHECKSUM --checksum-fill'
+        rule = ('-p udp -m udp --dport %d -j CHECKSUM --checksum-fill'
                 % const.DHCP_RESPONSE_PORT)
         expected = [mock.call.add_rule('POSTROUTING', rule)]
         self.mangle_inst.assert_has_calls(expected)

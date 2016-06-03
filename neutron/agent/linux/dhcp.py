@@ -671,8 +671,7 @@ class Dnsmasq(DhcpLocalProcess):
                           (port.mac_address, name, ip_address))
 
         utils.replace_file(filename, buf.getvalue())
-        LOG.debug('Done building host file %s with contents:\n%s', filename,
-                  buf.getvalue())
+        LOG.debug('Done building host file %s', filename)
         return filename
 
     def _get_client_id(self, port):
@@ -1222,7 +1221,8 @@ class DeviceManager(object):
                                  port.id,
                                  interface_name,
                                  port.mac_address,
-                                 namespace=network.namespace)
+                                 namespace=network.namespace,
+                                 mtu=network.get('mtu'))
             except Exception:
                 with excutils.save_and_reraise_exception():
                     LOG.exception(_LE('Unable to plug DHCP port for '
@@ -1293,7 +1293,7 @@ class DeviceManager(object):
         """Ensure DHCP reply packets always have correct UDP checksums."""
         iptables_mgr = iptables_manager.IptablesManager(use_ipv6=False,
                                                         namespace=namespace)
-        ipv4_rule = ('-p udp --dport %d -j CHECKSUM --checksum-fill'
+        ipv4_rule = ('-p udp -m udp --dport %d -j CHECKSUM --checksum-fill'
                      % constants.DHCP_RESPONSE_PORT)
         iptables_mgr.ipv4['mangle'].add_rule('POSTROUTING', ipv4_rule)
         iptables_mgr.apply()

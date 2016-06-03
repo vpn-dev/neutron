@@ -16,6 +16,7 @@
 import collections
 import itertools
 import operator
+import time
 
 from oslo_config import cfg
 from oslo_log import log as logging
@@ -205,8 +206,12 @@ class OVSBridge(BaseOVS):
 
     def replace_port(self, port_name, *interface_attr_tuples):
         """Replace existing port or create it, and configure port interface."""
+
+        # NOTE(xiaohhui): If del_port is inside the transaction, there will
+        # only be one command for replace_port. This will cause the new port
+        # not be found by system, which will lead to Bug #1519926.
+        self.ovsdb.del_port(port_name).execute()
         with self.ovsdb.transaction() as txn:
-            txn.add(self.ovsdb.del_port(port_name))
             txn.add(self.ovsdb.add_port(self.br_name, port_name,
                                         may_exist=False))
             if interface_attr_tuples:
@@ -220,13 +225,24 @@ class OVSBridge(BaseOVS):
 
     def run_ofctl(self, cmd, args, process_input=None):
         full_args = ["ovs-ofctl", cmd, self.br_name] + args
-        try:
-            return utils.execute(full_args, run_as_root=True,
-                                 process_input=process_input)
-        except Exception as e:
-            LOG.error(_LE("Unable to execute %(cmd)s. Exception: "
-                          "%(exception)s"),
-                      {'cmd': full_args, 'exception': e})
+        # TODO(kevinbenton): This error handling is really brittle and only
+        # detects one specific type of failure. The callers of this need to
+        # be refactored to expect errors so we can re-raise and they can
+        # take appropriate action based on the type of error.
+        for i in range(1, 11):
+            try:
+                return utils.execute(full_args, run_as_root=True,
+                                     process_input=process_input)
+            except Exception as e:
+                if "failed to connect to socket" in str(e):
+                    LOG.debug("Failed to connect to OVS. Retrying "
+                              "in 1 second. Attempt: %s/10", i)
+                    time.sleep(1)
+                    continue
+                LOG.error(_LE("Unable to execute %(cmd)s. Exception: "
+                              "%(exception)s"),
+                          {'cmd': full_args, 'exception': e})
+                break
 
     def count_flows(self):
         flow_list = self.run_ofctl("dump-flows", []).split("\n")[1:]

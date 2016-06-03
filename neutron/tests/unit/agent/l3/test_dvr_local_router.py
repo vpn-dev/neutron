@@ -157,6 +157,19 @@ class TestDvrRouterOperations(base.BaseTestCase):
                                     mock.Mock(),
                                     **kwargs)
 
+    def test_create_dvr_fip_interfaces_update(self):
+        ri = self._create_router()
+        fip_agent_port = {'subnets': []}
+        ri.get_floating_agent_gw_interface = mock.Mock(
+            return_value=fip_agent_port)
+        ri.get_floating_ips = mock.Mock(return_value=True)
+        ri.fip_ns = mock.Mock()
+        ri.fip_ns.subscribe.return_value = False
+        ex_gw_port = {'network_id': 'fake_net_id'}
+        ri.create_dvr_fip_interfaces(ex_gw_port)
+        ri.fip_ns.update_gateway_port.assert_called_once_with(
+            fip_agent_port)
+
     def test_get_floating_ips_dvr(self):
         router = mock.MagicMock()
         router.get.return_value = [{'host': HOSTNAME},
@@ -259,18 +272,14 @@ class TestDvrRouterOperations(base.BaseTestCase):
         ri.fip_ns.local_subnets.allocate.return_value = s1
         _, fip_to_rtr = s1.get_pair()
         fip_ns = ri.fip_ns
-        with mock.patch.object(self.plugin_api,
-                               'delete_agent_gateway_port') as del_fip_gw:
-            ri.floating_ip_removed_dist(fip_cidr)
-            self.assertTrue(del_fip_gw.called)
-            self.assertTrue(fip_ns.destroyed)
-            mIPWrapper().del_veth.assert_called_once_with(
-                fip_ns.get_int_device_name(router['id']))
-            mIPDevice().route.delete_gateway.assert_called_once_with(
-                str(fip_to_rtr.ip), table=16)
-            fip_ns.unsubscribe.assert_called_once_with(ri.router_id)
-            fip_ns.local_subnets.allocate.assert_called_once_with(
-                ri.router_id)
+        ri.floating_ip_removed_dist(fip_cidr)
+        self.assertTrue(fip_ns.destroyed)
+        mIPWrapper().del_veth.assert_called_once_with(
+            fip_ns.get_int_device_name(router['id']))
+        mIPDevice().route.delete_gateway.assert_called_once_with(
+            str(fip_to_rtr.ip), table=16)
+        fip_ns.unsubscribe.assert_called_once_with(ri.router_id)
+        fip_ns.local_subnets.allocate.assert_called_once_with(ri.router_id)
 
     def _test_add_floating_ip(self, ri, fip, is_failure):
         ri._add_fip_addr_to_device = mock.Mock(return_value=is_failure)

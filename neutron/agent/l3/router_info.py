@@ -24,7 +24,7 @@ from neutron.common import constants as l3_constants
 from neutron.common import exceptions as n_exc
 from neutron.common import ipv6_utils
 from neutron.common import utils as common_utils
-from neutron.i18n import _LW
+from neutron.i18n import _, _LW
 from neutron.ipam import utils as ipam_utils
 
 LOG = logging.getLogger(__name__)
@@ -80,7 +80,8 @@ class RouterInfo(object):
         self.radvd = ra.DaemonMonitor(self.router_id,
                                       self.ns_name,
                                       process_monitor,
-                                      self.get_internal_device_name)
+                                      self.get_internal_device_name,
+                                      self.agent_conf)
 
         if self.router_namespace:
             self.router_namespace.create()
@@ -143,11 +144,11 @@ class RouterInfo(object):
         return self.router.get(l3_constants.FLOATINGIP_KEY, [])
 
     def floating_forward_rules(self, floating_ip, fixed_ip):
-        return [('PREROUTING', '-d %s -j DNAT --to %s' %
+        return [('PREROUTING', '-d %s/32 -j DNAT --to-destination %s' %
                  (floating_ip, fixed_ip)),
-                ('OUTPUT', '-d %s -j DNAT --to %s' %
+                ('OUTPUT', '-d %s/32 -j DNAT --to-destination %s' %
                  (floating_ip, fixed_ip)),
-                ('float-snat', '-s %s -j SNAT --to %s' %
+                ('float-snat', '-s %s/32 -j SNAT --to-source %s' %
                  (fixed_ip, floating_ip))]
 
     def process_floating_ip_nat_rules(self):
@@ -175,8 +176,9 @@ class RouterInfo(object):
             self.process_floating_ip_nat_rules()
         except Exception:
             # TODO(salv-orlando): Less broad catching
-            raise n_exc.FloatingIpSetupException(
-                'L3 agent failure to setup NAT for floating IPs')
+            msg = _('L3 agent failure to setup NAT for floating IPs')
+            LOG.exception(msg)
+            raise n_exc.FloatingIpSetupException(msg)
 
     def _add_fip_addr_to_device(self, fip, device):
         """Configures the floating ip address on the device.
@@ -252,8 +254,9 @@ class RouterInfo(object):
             return self.process_floating_ip_addresses(interface_name)
         except Exception:
             # TODO(salv-orlando): Less broad catching
-            raise n_exc.FloatingIpSetupException('L3 agent failure to setup '
-                'floating IPs')
+            msg = _('L3 agent failure to setup floating IPs')
+            LOG.exception(msg)
+            raise n_exc.FloatingIpSetupException(msg)
 
     def put_fips_in_error_state(self):
         fip_statuses = {}
@@ -265,7 +268,7 @@ class RouterInfo(object):
         self.router['gw_port'] = None
         self.router[l3_constants.INTERFACE_KEY] = []
         self.router[l3_constants.FLOATINGIP_KEY] = []
-        self.process(agent)
+        self.process_delete(agent)
         self.disable_radvd()
         if self.router_namespace:
             self.router_namespace.delete()
@@ -289,12 +292,12 @@ class RouterInfo(object):
 
     def _internal_network_added(self, ns_name, network_id, port_id,
                                 fixed_ips, mac_address,
-                                interface_name, prefix):
+                                interface_name, prefix, mtu=None):
         LOG.debug("adding internal network: prefix(%s), port(%s)",
                   prefix, port_id)
         self.driver.plug(network_id, port_id, interface_name, mac_address,
                          namespace=ns_name,
-                         prefix=prefix)
+                         prefix=prefix, mtu=mtu)
 
         ip_cidrs = common_utils.fixed_ip_cidrs(fixed_ips)
         self.driver.init_router_port(
@@ -319,7 +322,8 @@ class RouterInfo(object):
                                      fixed_ips,
                                      mac_address,
                                      interface_name,
-                                     INTERNAL_DEV_PREFIX)
+                                     INTERNAL_DEV_PREFIX,
+                                     mtu=port.get('mtu'))
 
     def internal_network_removed(self, port):
         interface_name = self.get_internal_device_name(port['id'])
@@ -468,7 +472,8 @@ class RouterInfo(object):
                          ex_gw_port['mac_address'],
                          bridge=self.agent_conf.external_network_bridge,
                          namespace=ns_name,
-                         prefix=EXTERNAL_DEV_PREFIX)
+                         prefix=EXTERNAL_DEV_PREFIX,
+                         mtu=ex_gw_port.get('mtu'))
 
     def _get_external_gw_ips(self, ex_gw_port):
         gateway_ips = []
@@ -661,6 +666,27 @@ class RouterInfo(object):
                              self.iptables_manager,
                              interface_name)
 
+    def _process_external_on_delete(self, agent):
+        fip_statuses = {}
+        existing_floating_ips = self.floating_ips
+        try:
+            ex_gw_port = self.get_ex_gw_port()
+            self._process_external_gateway(ex_gw_port, agent.pd)
+            if not ex_gw_port:
+                return
+
+            interface_name = self.get_external_device_interface_name(
+                ex_gw_port)
+            fip_statuses = self.configure_fip_addresses(interface_name)
+
+        except (n_exc.FloatingIpSetupException) as e:
+                # All floating IPs must be put in error state
+                LOG.exception(e)
+                fip_statuses = self.put_fips_in_error_state()
+        finally:
+            agent.update_fip_statuses(
+                self, existing_floating_ips, fip_statuses)
+
     def process_external(self, agent):
         fip_statuses = {}
         existing_floating_ips = self.floating_ips
@@ -688,6 +714,22 @@ class RouterInfo(object):
         finally:
             agent.update_fip_statuses(
                 self, existing_floating_ips, fip_statuses)
+
+    @common_utils.exception_logger()
+    def process_delete(self, agent):
+        """Process the delete of this router
+
+        This method is the point where the agent requests that this router
+        be deleted. This is a separate code path from process in that it
+        avoids any changes to the qrouter namespace that will be removed
+        at the end of the operation.
+
+        :param agent: Passes the agent in order to send RPC messages.
+        """
+        LOG.debug("process router delete")
+        self._process_internal_ports(agent.pd)
+        agent.pd.sync_router(self.router['id'])
+        self._process_external_on_delete(agent)
 
     @common_utils.exception_logger()
     def process(self, agent):

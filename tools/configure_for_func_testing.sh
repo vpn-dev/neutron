@@ -19,6 +19,7 @@ set -e
 # Control variable used to determine whether to execute this script
 # directly or allow the gate_hook to import.
 IS_GATE=${IS_GATE:-False}
+USE_CONSTRAINT_ENV=${USE_CONSTRAINT_ENV:-True}
 
 
 if [[ "$IS_GATE" != "True" ]] && [[ "$#" -lt 1 ]]; then
@@ -51,7 +52,7 @@ done
 # when sourcing.
 VENV=${VENV:-dsvm-functional}
 # If executed in the gate, run in a constrained env
-if [[ "$IS_GATE" == "True" ]]
+if [[ "$IS_GATE" == "True" && "$USE_CONSTRAINT_ENV" == "True" ]]
 then
     VENV=$VENV-constraints
 fi
@@ -220,6 +221,11 @@ function _install_post_devstack {
 
     if is_ubuntu; then
         install_package netcat-openbsd
+        install_package isc-dhcp-client
+    elif is_fedora; then
+        install_package dhclient
+    else
+        exit_distro_not_supported "installing dhclient package"
     fi
 
     # Installing python-openvswitch from packages is a stop-gap while

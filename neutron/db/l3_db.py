@@ -518,6 +518,12 @@ class L3_NAT_dbonly_mixin(l3.RouterPluginBase):
         if not (port_id_specified or subnet_id_specified):
             msg = _("Either subnet_id or port_id must be specified")
             raise n_exc.BadRequest(resource='router', msg=msg)
+        for key in ('port_id', 'subnet_id'):
+            if key not in interface_info:
+                continue
+            err = attributes._validate_uuid(interface_info[key])
+            if err:
+                raise n_exc.BadRequest(resource='router', msg=err)
         if not for_removal:
             if port_id_specified and subnet_id_specified:
                 msg = _("Cannot specify both subnet-id and port-id")
@@ -1092,6 +1098,20 @@ class L3_NAT_dbonly_mixin(l3.RouterPluginBase):
         return self._get_collection_count(context, FloatingIP,
                                           filters=filters)
 
+    def _router_exists(self, context, router_id):
+        try:
+            self.get_router(context.elevated(), router_id)
+            return True
+        except l3.RouterNotFound:
+            return False
+
+    def _floating_ip_exists(self, context, floating_ip_id):
+        try:
+            self.get_floatingip(context, floating_ip_id)
+            return True
+        except l3.FloatingIPNotFound:
+            return False
+
     def prevent_l3_port_deletion(self, context, port_id):
         """Checks to make sure a port is allowed to be deleted.
 
@@ -1106,19 +1126,38 @@ class L3_NAT_dbonly_mixin(l3.RouterPluginBase):
         except n_exc.PortNotFound:
             # non-existent ports don't need to be protected from deletion
             return
-        if port['device_owner'] in self.router_device_owners:
-            # Raise port in use only if the port has IP addresses
-            # Otherwise it's a stale port that can be removed
-            fixed_ips = port['fixed_ips']
-            if fixed_ips:
-                reason = _('has device owner %s') % port['device_owner']
-                raise n_exc.ServicePortInUse(port_id=port['id'],
-                                             reason=reason)
-            else:
-                LOG.debug("Port %(port_id)s has owner %(port_owner)s, but "
-                          "no IP address, so it can be deleted",
-                          {'port_id': port['id'],
-                           'port_owner': port['device_owner']})
+        if port['device_owner'] not in self.router_device_owners:
+            return
+        # Raise port in use only if the port has IP addresses
+        # Otherwise it's a stale port that can be removed
+        fixed_ips = port['fixed_ips']
+        if not fixed_ips:
+            LOG.debug("Port %(port_id)s has owner %(port_owner)s, but "
+                      "no IP address, so it can be deleted",
+                      {'port_id': port['id'],
+                       'port_owner': port['device_owner']})
+            return
+        # NOTE(kevinbenton): we also check to make sure that the
+        # router still exists. It's possible for HA router interfaces
+        # to remain after the router is deleted if they encounter an
+        # error during deletion.
+        # Elevated context in case router is owned by another tenant
+        if port['device_owner'] == DEVICE_OWNER_FLOATINGIP:
+            if not self._floating_ip_exists(context, port['device_id']):
+                LOG.debug("Floating IP %(f_id)s corresponding to port "
+                          "%(port_id)s no longer exists, allowing deletion.",
+                          {'f_id': port['device_id'], 'port_id': port['id']})
+                return
+        elif not self._router_exists(context, port['device_id']):
+            LOG.debug("Router %(router_id)s corresponding to port "
+                      "%(port_id)s  no longer exists, allowing deletion.",
+                      {'router_id': port['device_id'],
+                       'port_id': port['id']})
+            return
+
+        reason = _('has device owner %s') % port['device_owner']
+        raise n_exc.ServicePortInUse(port_id=port['id'],
+                                     reason=reason)
 
     def disassociate_floatingips(self, context, port_id):
         """Disassociate all floating IPs linked to specific port.
@@ -1198,7 +1237,18 @@ class L3_NAT_dbonly_mixin(l3.RouterPluginBase):
                       for rp in qry]
         return interfaces
 
-    def _populate_subnets_for_ports(self, context, ports):
+    def _get_mtus_by_network_list(self, context, network_ids):
+        if not network_ids:
+            return {}
+        filters = {'network_id': network_ids}
+        fields = ['id', 'mtu']
+        networks = self._core_plugin.get_networks(context, filters=filters,
+                                                  fields=fields)
+        mtus_by_network = dict((network['id'], network.get('mtu', 0))
+                               for network in networks)
+        return mtus_by_network
+
+    def _populate_mtu_and_subnets_for_ports(self, context, ports):
         """Populate ports with subnets.
 
         These ports already have fixed_ips populated.
@@ -1224,6 +1274,7 @@ class L3_NAT_dbonly_mixin(l3.RouterPluginBase):
         fields = ['id', 'cidr', 'gateway_ip',
                   'network_id', 'ipv6_ra_mode', 'subnetpool_id']
 
+        mtus_by_network = self._get_mtus_by_network_list(context, network_ids)
         subnets_by_network = dict((id, []) for id in network_ids)
         for subnet in self._core_plugin.get_subnets(context, filters, fields):
             subnets_by_network[subnet['network_id']].append(subnet)
@@ -1252,6 +1303,8 @@ class L3_NAT_dbonly_mixin(l3.RouterPluginBase):
                 else:
                     # This subnet is not used by the port.
                     port['extra_subnets'].append(subnet_info)
+
+            port['mtu'] = mtus_by_network.get(port['network_id'], 0)
 
     def _process_floating_ips(self, context, routers_dict, floating_ips):
         for floating_ip in floating_ips:
@@ -1288,7 +1341,7 @@ class L3_NAT_dbonly_mixin(l3.RouterPluginBase):
             context, router_ids=router_ids, active=active)
         ports_to_populate = [router['gw_port'] for router in routers
                              if router.get('gw_port')] + interfaces
-        self._populate_subnets_for_ports(context, ports_to_populate)
+        self._populate_mtu_and_subnets_for_ports(context, ports_to_populate)
         routers_dict = dict((router['id'], router) for router in routers)
         self._process_floating_ips(context, routers_dict, floating_ips)
         self._process_interfaces(routers_dict, interfaces)
