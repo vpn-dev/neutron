@@ -21,9 +21,10 @@ import six
 from neutron.agent.common import config
 from neutron.agent.linux import interface
 from neutron.agent.linux import iptables_manager
+from neutron.agent.linux import ip_lib
 from neutron.common import constants as constants
 from neutron.common import ipv6_utils
-from neutron.i18n import _LE, _LI
+from neutron.i18n import _LE, _LI, _LW
 from neutron.services.metering.drivers import abstract_driver
 
 
@@ -56,7 +57,11 @@ class IptablesManagerTransaction(object):
     def __exit__(self, type, value, traceback):
         transaction = self.__transactions.get(self.im)
         if transaction == 1:
-            self.im.apply()
+            try:
+                if self.im.namespace in ip_lib.IPWrapper.get_namespaces():
+                    self.im.apply()
+            except:
+                pass
             del self.__transactions[self.im]
         else:
             transaction -= 1
@@ -147,6 +152,12 @@ class IptablesMeteringDriver(abstract_driver.MeteringAbstractDriver):
     def _process_metering_label_rule_add(self, rm, rule, ext_dev,
                                          label_chain, rules_chain):
         im = rm.iptables_manager
+        try:
+            im.ipv4['filter'].add_chain(label_chain, wrap=False)
+            im.ipv4['filter'].add_rule(label_chain, '', wrap=False)
+            im.ipv4['filter'].add_chain(rules_chain, wrap=False)
+        except:
+            pass
         self._add_rule_to_chain(ext_dev, rule, im, label_chain, rules_chain)
 
     def _process_metering_label_rule_delete(self, rm, rule, ext_dev,
@@ -348,23 +359,27 @@ class IptablesMeteringDriver(abstract_driver.MeteringAbstractDriver):
     @log_helpers.log_method_call
     def get_traffic_counters(self, context, routers):
         accs = {}
+        routers_to_reconfigure = []
         for router in routers:
             rm = self.routers.get(router['id'])
             if not rm:
                 continue
 
             for label_id, label in rm.metering_labels.items():
+                chain_acc = None
                 try:
                     chain = iptables_manager.get_chain_name(WRAP_NAME +
                                                             LABEL +
                                                             label_id,
                                                             wrap=False)
-
-                    chain_acc = rm.iptables_manager.get_traffic_counters(
-                        chain, wrap=False, zero=True)
+                    if rm.ns_name in ip_lib.IPWrapper.get_namespaces():
+                        chain_acc = rm.iptables_manager.get_traffic_counters(
+                            chain, wrap=False, zero=True)
                 except RuntimeError:
-                    LOG.exception(_LE('Failed to get traffic counters, '
+                    LOG.warn(_LW('Failed to get traffic counters, '
                                       'router: %s'), router)
+                    if router['id'] not in routers_to_reconfigure:
+                        routers_to_reconfigure.append(router['id'])
                     continue
 
                 if not chain_acc:
@@ -376,5 +391,9 @@ class IptablesMeteringDriver(abstract_driver.MeteringAbstractDriver):
                 acc['bytes'] += chain_acc['bytes']
 
                 accs[label_id] = acc
+
+        for router_id in routers_to_reconfigure:
+            self.routers.pop(router_id, None)
+            LOG.warn(_LW('Auto recovery router: %s'), router)
 
         return accs
