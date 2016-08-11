@@ -165,16 +165,19 @@ class TestOvsNeutronAgent(object):
         with mock.patch.object(self.agent, 'int_br', autospec=True) as int_br:
             int_br.db_get_val.return_value = db_get_val
             int_br.set_db_attribute.return_value = True
-            self.agent.port_bound(port, net_uuid, 'local', None, None,
-                                  fixed_ips, "compute:None", False)
+            needs_binding = self.agent.port_bound(
+                port, net_uuid, 'local', None, None,
+                fixed_ips, "compute:None", False)
         if db_get_val is None:
             self.assertEqual(0, int_br.set_db_attribute.call_count)
+            self.assertFalse(needs_binding)
         else:
             vlan_mapping = {'net_uuid': net_uuid,
                             'network_type': 'local',
                             'physical_network': None}
             int_br.set_db_attribute.assert_called_once_with(
                 "Port", mock.ANY, "other_config", vlan_mapping)
+            self.assertTrue(needs_binding)
 
     def test_datapath_type_system(self):
         # verify kernel datapath is default
@@ -425,6 +428,150 @@ class TestOvsNeutronAgent(object):
                                       updated_ports)
         self.assertEqual(expected, actual)
 
+    def _test_process_ports_events(self, events, registered_ports,
+                                   ancillary_ports, expected_ports,
+                                   expected_ancillary, updated_ports=None,
+                                   ):
+        with mock.patch.object(self.agent, 'check_changed_vlans',
+                               return_value=set()):
+            devices_not_ready_yet = set()
+            failed_devices = {'added': set(), 'removed': set()}
+            failed_ancillary_devices = {
+                'added': set(), 'removed': set()}
+            actual = self.agent.process_ports_events(
+                events, registered_ports, ancillary_ports,
+                devices_not_ready_yet, failed_devices,
+                failed_ancillary_devices, updated_ports)
+            self.assertEqual(
+                (expected_ports, expected_ancillary, devices_not_ready_yet),
+                actual)
+
+    def test_process_ports_events_returns_current_for_unchanged_ports(self):
+        events = {'added': [], 'removed': []}
+        registered_ports = {1, 3}
+        ancillary_ports = {2, 5}
+        expected_ports = {'current': registered_ports, 'added': set(),
+                          'removed': set()}
+        expected_ancillary = {'current': ancillary_ports, 'added': set(),
+                              'removed': set()}
+        self._test_process_ports_events(events, registered_ports,
+                                        ancillary_ports, expected_ports,
+                                        expected_ancillary)
+
+    def test_process_port_events_no_vif_changes_return_updated_port_only(self):
+        events = {'added': [], 'removed': []}
+        registered_ports = {1, 2, 3}
+        updated_ports = {2}
+        expected_ports = dict(current=registered_ports, updated={2},
+                              added=set(), removed=set())
+        expected_ancillary = dict(current=set(), added=set(), removed=set())
+        self._test_process_ports_events(events, registered_ports,
+                                        set(), expected_ports,
+                                        expected_ancillary, updated_ports)
+
+    def test_process_port_events_ignores_removed_port_if_never_added(self):
+        events = {'added': [],
+                  'removed': [{'name': 'port2', 'ofport': 2,
+                               'external_ids': {'attached-mac': 'test-mac'}}]}
+        registered_ports = {1}
+        expected_ports = dict(current=registered_ports, added=set(),
+                              removed=set())
+        expected_ancillary = dict(current=set(), added=set(), removed=set())
+        devices_not_ready_yet = set()
+        with mock.patch.object(self.agent.int_br, 'portid_from_external_ids',
+                               side_effect=[2]), \
+            mock.patch.object(self.agent, 'check_changed_vlans',
+                              return_value=set()):
+            failed_devices = {'added': set(), 'removed': set()}
+            failed_ancillary_devices = {
+                'added': set(), 'removed': set()}
+            ports_not_ready_yet = set()
+            actual = self.agent.process_ports_events(
+                events, registered_ports, set(), ports_not_ready_yet,
+                failed_devices, failed_ancillary_devices)
+            self.assertEqual(
+                (expected_ports, expected_ancillary, devices_not_ready_yet),
+                actual)
+
+    def test_process_port_events_port_not_ready_yet(self):
+        events = {'added': [{'name': 'port5', 'ofport': [],
+                  'external_ids': {'attached-mac': 'test-mac'}}],
+                  'removed': []}
+        old_devices_not_ready = {'port4'}
+        registered_ports = set([1, 2, 3])
+        expected_ports = dict(current=set([1, 2, 3, 4]),
+                              added=set([4]), removed=set())
+        self.agent.ancillary_brs = []
+        expected_ancillary = dict(current=set(), added=set(), removed=set())
+        with mock.patch.object(self.agent.int_br, 'portid_from_external_ids',
+                               side_effect=[5, 4]), \
+            mock.patch.object(self.agent, 'check_changed_vlans',
+                              return_value=set()), \
+            mock.patch.object(self.agent.int_br, 'get_ports_attributes',
+                              return_value=[{'name': 'port4', 'ofport': 4,
+                                             'external_ids': {
+                                                 'attached-mac': 'mac4'}}]):
+            expected_devices_not_ready = {'port5'}
+            failed_devices = {'added': set(), 'removed': set()}
+            failed_ancillary_devices = {
+                'added': set(), 'removed': set()}
+            actual = self.agent.process_ports_events(
+                events, registered_ports, set(), old_devices_not_ready,
+                failed_devices, failed_ancillary_devices)
+            self.assertEqual(
+                (expected_ports, expected_ancillary,
+                 expected_devices_not_ready), actual)
+
+    def _test_process_port_events_with_updated_ports(self, updated_ports):
+        events = {'added': [{'name': 'port3', 'ofport': 3,
+                            'external_ids': {'attached-mac': 'test-mac'}},
+                            {'name': 'qg-port2', 'ofport': 6,
+                             'external_ids': {'attached-mac': 'test-mac'}}],
+                  'removed': [{'name': 'port2', 'ofport': 2,
+                               'external_ids': {'attached-mac': 'test-mac'}},
+                              {'name': 'qg-port1', 'ofport': 5,
+                               'external_ids': {'attached-mac': 'test-mac'}}]}
+        registered_ports = {1, 2, 4}
+        ancillary_ports = {5, 8}
+        expected_ports = dict(current={1, 3, 4}, added={3}, removed={2})
+        if updated_ports:
+            expected_ports['updated'] = updated_ports
+        expected_ancillary = dict(current={6, 8}, added={6},
+                                  removed={5})
+        ancillary_bridge = mock.Mock()
+        ancillary_bridge.get_vif_port_set.return_value = {5, 6, 8}
+        self.agent.ancillary_brs = [ancillary_bridge]
+        with mock.patch.object(self.agent.int_br, 'portid_from_external_ids',
+                              side_effect=[3, 6, 2, 5]), \
+            mock.patch.object(self.agent, 'check_changed_vlans',
+                              return_value=set()):
+
+            devices_not_ready_yet = set()
+            failed_devices = {'added': set(), 'removed': set()}
+            failed_ancillary_devices = {
+                'added': set(), 'removed': set()}
+            actual = self.agent.process_ports_events(
+                events, registered_ports, ancillary_ports,
+                devices_not_ready_yet, failed_devices,
+                failed_ancillary_devices, updated_ports)
+            self.assertEqual(
+                (expected_ports, expected_ancillary, devices_not_ready_yet),
+                actual)
+
+    def test_process_port_events_returns_port_changes(self):
+        self._test_process_port_events_with_updated_ports(set())
+
+    def test_process_port_events_finds_known_updated_ports(self):
+        self._test_process_port_events_with_updated_ports({4})
+
+    def test_process_port_events_ignores_unknown_updated_ports(self):
+        # the port '10' was not seen on current ports. Hence it has either
+        # never been wired or already removed and should be ignored
+        self._test_process_port_events_with_updated_ports({4, 10})
+
+    def test_process_port_events_ignores_updated_port_if_removed(self):
+        self._test_process_port_events_with_updated_ports({4, 5})
+
     def test_update_ports_returns_changed_vlan(self):
         br = self.br_int_cls('br-int')
         mac = "ca:fe:de:ad:be:ef"
@@ -444,6 +591,32 @@ class TestOvsNeutronAgent(object):
             actual = self.mock_scan_ports(
                 vif_port_set, registered_ports, port_tags_dict=port_tags_dict)
         self.assertEqual(expected, actual)
+
+    def test_update_retries_map_and_remove_devs_not_to_retry(self):
+        failed_devices_retries_map = {
+            'device_not_to_retry': constants.MAX_DEVICE_RETRIES,
+            'device_to_retry': 2,
+            'ancillary_not_to_retry': constants.MAX_DEVICE_RETRIES,
+            'ancillary_to_retry': 1}
+        failed_devices = {
+            'added': set(['device_not_to_retry']),
+            'removed': set(['device_to_retry', 'new_device'])}
+        failed_ancillary_devices = {'added': set(['ancillary_to_retry']),
+                                    'removed': set(['ancillary_not_to_retry'])}
+        expected_failed_devices_retries_map = {
+            'device_to_retry': 3, 'new_device': 1, 'ancillary_to_retry': 2}
+        (new_failed_devices_retries_map, devices_not_to_retry,
+         ancillary_devices_not_t_retry) = self.agent._get_devices_not_to_retry(
+            failed_devices, failed_ancillary_devices,
+            failed_devices_retries_map)
+        self.agent._remove_devices_not_to_retry(
+            failed_devices, failed_ancillary_devices, devices_not_to_retry,
+            ancillary_devices_not_t_retry)
+        self.assertIn('device_to_retry', failed_devices['removed'])
+        self.assertNotIn('device_not_to_retry', failed_devices['added'])
+        self.assertEqual(
+            expected_failed_devices_retries_map,
+            new_failed_devices_retries_map)
 
     def test_add_port_tag_info(self):
         self.agent.local_vlan_map["net1"] = mock.Mock()
@@ -555,7 +728,7 @@ class TestOvsNeutronAgent(object):
         with mock.patch.object(self.agent.plugin_rpc,
                                'get_devices_details_list_and_failed_devices',
                                return_value={'devices': [details],
-                                             'failed_devices': None}),\
+                                             'failed_devices': []}),\
                 mock.patch.object(self.agent.int_br,
                                   'get_vifs_by_ids',
                                   return_value={details['device']: port}),\
@@ -568,8 +741,8 @@ class TestOvsNeutronAgent(object):
                     'get_port_tag_dict',
                     return_value={}),\
                 mock.patch.object(self.agent, func_name) as func:
-            skip_devs, need_bound_devices, insecure_ports = (
-                self.agent.treat_devices_added_or_updated([{}], False))
+            skip_devs, need_bound_devices, insecure_ports, _ = (
+                self.agent.treat_devices_added_or_updated([], False))
             # The function should not raise
             self.assertFalse(skip_devs)
             return func.called
@@ -613,7 +786,7 @@ class TestOvsNeutronAgent(object):
         with mock.patch.object(self.agent.plugin_rpc,
                                'get_devices_details_list_and_failed_devices',
                                return_value={'devices': [details],
-                                             'failed_devices': None}),\
+                                             'failed_devices': []}),\
             mock.patch.object(self.agent.ext_manager,
                               'handle_port', new=fake_handle_port),\
             mock.patch.object(self.agent.int_br,
@@ -622,7 +795,7 @@ class TestOvsNeutronAgent(object):
             mock.patch.object(self.agent, 'treat_vif_port',
                               return_value=False):
 
-            self.agent.treat_devices_added_or_updated([{}], False)
+            self.agent.treat_devices_added_or_updated([], False)
 
     def test_treat_devices_added_updated_skips_if_port_not_found(self):
         dev_mock = mock.MagicMock()
@@ -630,7 +803,7 @@ class TestOvsNeutronAgent(object):
         with mock.patch.object(self.agent.plugin_rpc,
                                'get_devices_details_list_and_failed_devices',
                                return_value={'devices': [dev_mock],
-                                             'failed_devices': None}),\
+                                             'failed_devices': []}),\
                 mock.patch.object(self.agent.int_br,
                     'get_port_tag_dict',
                     return_value={}),\
@@ -639,10 +812,29 @@ class TestOvsNeutronAgent(object):
                                   return_value={}),\
                 mock.patch.object(self.agent,
                                   'treat_vif_port') as treat_vif_port:
-            skip_devs = self.agent.treat_devices_added_or_updated([{}], False)
+            skip_devs = self.agent.treat_devices_added_or_updated([], False)
             # The function should return False for resync and no device
             # processed
-            self.assertEqual((['the_skipped_one'], [], []), skip_devs)
+            self.assertEqual((['the_skipped_one'], [], [], set()), skip_devs)
+            self.assertFalse(treat_vif_port.called)
+
+    def test_treat_devices_added_failed_devices(self):
+        dev_mock = 'the_failed_one'
+        with mock.patch.object(self.agent.plugin_rpc,
+                               'get_devices_details_list_and_failed_devices',
+                               return_value={'devices': [],
+                                             'failed_devices': [dev_mock]}),\
+                mock.patch.object(self.agent.int_br,
+                                  'get_vifs_by_ids',
+                                  return_value={}),\
+                mock.patch.object(self.agent,
+                                  'treat_vif_port') as treat_vif_port:
+            failed_devices = {'added': set(), 'removed': set()}
+            (_, _, _, failed_devices['added']) = (
+                self.agent.treat_devices_added_or_updated([], False))
+            # The function should return False for resync and no device
+            # processed
+            self.assertEqual(set([dev_mock]), failed_devices.get('added'))
             self.assertFalse(treat_vif_port.called)
 
     def test_treat_devices_added_updated_put_port_down(self):
@@ -662,7 +854,7 @@ class TestOvsNeutronAgent(object):
         with mock.patch.object(self.agent.plugin_rpc,
                                'get_devices_details_list_and_failed_devices',
                                return_value={'devices': [fake_details_dict],
-                                             'failed_devices': None}),\
+                                             'failed_devices': []}),\
                 mock.patch.object(self.agent.int_br,
                                   'get_vifs_by_ids',
                                   return_value={'xxx': mock.MagicMock()}),\
@@ -670,8 +862,8 @@ class TestOvsNeutronAgent(object):
                                   return_value={}),\
                 mock.patch.object(self.agent,
                                   'treat_vif_port') as treat_vif_port:
-            skip_devs, need_bound_devices, insecure_ports = (
-                self.agent.treat_devices_added_or_updated([{}], False))
+            skip_devs, need_bound_devices, insecure_ports, _ = (
+                self.agent.treat_devices_added_or_updated([], False))
             # The function should return False for resync
             self.assertFalse(skip_devs)
             self.assertTrue(treat_vif_port.called)
@@ -694,6 +886,19 @@ class TestOvsNeutronAgent(object):
     def test_treat_devices_removed_ignores_missing_port(self):
         self._mock_treat_devices_removed(False)
 
+    def test_treat_devices_removed_failed_devices(self):
+        dev_mock = 'the_failed_one'
+        with mock.patch.object(self.agent.plugin_rpc,
+                               'update_device_list',
+                               return_value={'devices_up': [],
+                                             'devices_down': [],
+                                             'failed_devices_up': [],
+                                             'failed_devices_down': [
+                                                 dev_mock]}):
+            failed_devices = {'added': set(), 'removed': set()}
+            failed_devices['removed'] = self.agent.treat_devices_removed([{}])
+            self.assertEqual(set([dev_mock]), failed_devices.get('removed'))
+
     def test_bind_port_with_missing_network(self):
         vif_port = mock.Mock()
         vif_port.name.return_value = 'port'
@@ -701,19 +906,24 @@ class TestOvsNeutronAgent(object):
                                    'vif_port': vif_port}])
 
     def _test_process_network_ports(self, port_info):
+        failed_devices = {'added': set(), 'removed': set()}
         with mock.patch.object(self.agent.sg_agent,
                                "setup_port_filters") as setup_port_filters,\
                 mock.patch.object(
-                    self.agent,
-                    "treat_devices_added_or_updated",
-                    return_value=([], [], [])) as device_added_updated,\
+                    self.agent, "treat_devices_added_or_updated",
+                    return_value=(
+                        [], [], [],
+                        failed_devices['added'])) as device_added_updated,\
                 mock.patch.object(self.agent.int_br, "get_ports_attributes",
                                   return_value=[]),\
                 mock.patch.object(self.agent,
                                   "treat_devices_removed",
-                                  return_value=False) as device_removed:
-            self.assertFalse(self.agent.process_network_ports(port_info,
-                                                              False))
+                                  return_value=(
+                                      failed_devices[
+                                          'removed'])) as device_removed:
+            self.assertEqual(
+                failed_devices,
+                self.agent.process_network_ports(port_info, False))
             setup_port_filters.assert_called_once_with(
                 port_info.get('added', set()),
                 port_info.get('updated', set()))
@@ -746,14 +956,18 @@ class TestOvsNeutronAgent(object):
                      'updated': set(['tap1']),
                      'removed': set([]),
                      'added': set(['eth1'])}
+        failed_dev = {'added': set(), 'removed': set()}
         with mock.patch.object(self.agent.sg_agent,
                                "setup_port_filters") as setup_port_filters,\
                 mock.patch.object(
                     self.agent,
                     "treat_devices_added_or_updated",
-                    return_value=([], [], ['eth1'])) as device_added_updated:
-            self.assertFalse(self.agent.process_network_ports(port_info,
-                                                              False))
+                    return_value=(
+                        [], [], ['eth1'],
+                        failed_dev['added'])) as device_added_updated:
+            self.assertEqual(
+                failed_dev,
+                self.agent.process_network_ports(port_info, False))
             device_added_updated.assert_called_once_with(
                 set(['eth1', 'tap1']), False)
             setup_port_filters.assert_called_once_with(
@@ -1427,11 +1641,17 @@ class TestOvsNeutronAgent(object):
 
         self.agent.enable_tunneling = True
 
+        reply_ancillary = {'current': set([]),
+                           'added': set([]),
+                           'removed': set([])}
+
         with mock.patch.object(async_process.AsyncProcess, "_spawn"),\
+                mock.patch.object(async_process.AsyncProcess, "start"),\
+                mock.patch.object(async_process.AsyncProcess, "stop"),\
                 mock.patch.object(log.KeywordArgumentAdapter,
                                   'exception') as log_exception,\
                 mock.patch.object(self.mod_agent.OVSNeutronAgent,
-                                  'scan_ports') as scan_ports,\
+                                  'process_ports_events') as process_p_events,\
                 mock.patch.object(
                     self.mod_agent.OVSNeutronAgent,
                     'process_network_ports') as process_network_ports,\
@@ -1457,19 +1677,31 @@ class TestOvsNeutronAgent(object):
                     '_reset_tunnel_ofports') as reset_tunnel_ofports:
             log_exception.side_effect = Exception(
                 'Fake exception to get out of the loop')
-            scan_ports.side_effect = [reply2, reply3]
+            devices_not_ready = set()
+            process_p_events.side_effect = [(reply2, reply_ancillary,
+                                             devices_not_ready),
+                                            (reply3, reply_ancillary,
+                                             devices_not_ready)]
+            failed_devices = {'added': set(), 'removed': set()}
+            failed_ancillary_devices = {'added': set(), 'removed': set()}
             process_network_ports.side_effect = [
-                False, Exception('Fake exception to get out of the loop')]
+                failed_devices,
+                Exception('Fake exception to get out of the loop')]
             check_ovs_status.side_effect = args
             try:
                 self.agent.daemon_loop()
             except Exception:
                 pass
 
-            scan_ports.assert_has_calls([
-                mock.call(set(), True, set()),
-                mock.call(set(), False, set())
+            process_p_events.assert_has_calls([
+                mock.call({'removed': [], 'added': []}, set(), set(), set(),
+                          failed_devices, failed_ancillary_devices,
+                          set()),
+                mock.call({'removed': [], 'added': []}, set(['tap0']), set(),
+                          set(), failed_devices, failed_ancillary_devices,
+                          set())
             ])
+
             process_network_ports.assert_has_calls([
                 mock.call(reply2, False),
                 mock.call(reply3, True)
@@ -1512,7 +1744,7 @@ class TestOvsNeutronAgent(object):
                 mock.patch.object(
                     self.mod_agent.OVSNeutronAgent,
                     '_check_and_handle_signal') as check_and_handle_signal:
-            process_network_ports.return_value = True
+            process_network_ports.side_effect = Exception("Trigger resync")
             check_ovs_status.return_value = constants.OVS_NORMAL
             check_and_handle_signal.side_effect = [True, False]
             self.agent.daemon_loop()
@@ -2341,7 +2573,9 @@ class TestOvsDvrNeutronAgent(object):
                 mock.patch.object(self.agent.dvr_agent, 'tun_br', new=tun_br),\
                 mock.patch.dict(self.agent.dvr_agent.phys_brs,
                                 {self._physical_network: phys_br}):
-            self.agent.treat_devices_removed([self._port.vif_id])
+            failed_devices = {'added': set(), 'removed': set()}
+            failed_devices['removed'] = self.agent.treat_devices_removed(
+                [self._port.vif_id])
             lvid = self.agent.local_vlan_map[self._net_uuid].vlan
             if ip_version == 4:
                 expected = [
@@ -2455,7 +2689,9 @@ class TestOvsDvrNeutronAgent(object):
                 mock.patch.object(self.agent, 'tun_br', new=tun_br),\
                 mock.patch.object(self.agent.dvr_agent, 'int_br', new=int_br),\
                 mock.patch.object(self.agent.dvr_agent, 'tun_br', new=tun_br):
-            self.agent.treat_devices_removed([self._compute_port.vif_id])
+            failed_devices = {'added': set(), 'removed': set()}
+            failed_devices['removed'] = self.agent.treat_devices_removed(
+                [self._compute_port.vif_id])
             int_br.assert_has_calls([
                 mock.call.delete_dvr_to_src_mac(
                     network_type='vxlan',
@@ -2551,7 +2787,9 @@ class TestOvsDvrNeutronAgent(object):
                 mock.patch.object(self.agent, 'tun_br', new=tun_br),\
                 mock.patch.object(self.agent.dvr_agent, 'int_br', new=int_br),\
                 mock.patch.object(self.agent.dvr_agent, 'tun_br', new=tun_br):
-            self.agent.treat_devices_removed([self._port.vif_id])
+            failed_devices = {'added': set(), 'removed': set()}
+            failed_devices['removed'] = self.agent.treat_devices_removed(
+                [self._port.vif_id])
             expected_on_int_br = [
                 mock.call.delete_dvr_to_src_mac(
                     network_type='vxlan',
