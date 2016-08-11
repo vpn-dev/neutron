@@ -20,11 +20,11 @@ import six
 
 from neutron.agent.common import config
 from neutron.agent.linux import interface
-from neutron.agent.linux import iptables_manager
 from neutron.agent.linux import ip_lib
+from neutron.agent.linux import iptables_manager
 from neutron.common import constants as constants
 from neutron.common import ipv6_utils
-from neutron.i18n import _LE, _LI, _LW
+from neutron.i18n import _LI, _LW
 from neutron.services.metering.drivers import abstract_driver
 
 
@@ -60,7 +60,7 @@ class IptablesManagerTransaction(object):
             try:
                 if self.im.namespace in ip_lib.IPWrapper.get_namespaces():
                     self.im.apply()
-            except:
+            except Exception:
                 pass
             del self.__transactions[self.im]
         else:
@@ -156,7 +156,7 @@ class IptablesMeteringDriver(abstract_driver.MeteringAbstractDriver):
             im.ipv4['filter'].add_chain(label_chain, wrap=False)
             im.ipv4['filter'].add_rule(label_chain, '', wrap=False)
             im.ipv4['filter'].add_chain(rules_chain, wrap=False)
-        except:
+        except Exception:
             pass
         self._add_rule_to_chain(ext_dev, rule, im, label_chain, rules_chain)
 
@@ -377,7 +377,7 @@ class IptablesMeteringDriver(abstract_driver.MeteringAbstractDriver):
                             chain, wrap=False, zero=True)
                 except RuntimeError:
                     LOG.warn(_LW('Failed to get traffic counters, '
-                                      'router: %s'), router)
+                                 'router: %s'), router)
                     if router['id'] not in routers_to_reconfigure:
                         routers_to_reconfigure.append(router['id'])
                     continue
@@ -394,6 +394,6 @@ class IptablesMeteringDriver(abstract_driver.MeteringAbstractDriver):
 
         for router_id in routers_to_reconfigure:
             self.routers.pop(router_id, None)
-            LOG.warn(_LW('Auto recovery router: %s'), router)
+            LOG.warn(_LW('Auto recovery router: %s'), router_id)
 
         return accs
